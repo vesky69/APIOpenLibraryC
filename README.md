@@ -1,3 +1,2 @@
-Breno Rodrigues dos santos 
-
-Julia dias
+Breno Rodrigues dos Santos 
+Júlia Dias Olivieri
