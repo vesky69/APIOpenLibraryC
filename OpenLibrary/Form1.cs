@@ -1,28 +1,26 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient; //ADONet
 using System.Drawing;
 using System.IO;
-using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace OpenLibrary
 {
     public partial class Form1 : Form
     {
-        private readonly string dataFilePath;
+        private readonly string connectionString = @"Data Source=LAB532; Initial Catalog=library; User ID=breno; Password=LltEr032007.; TrustServerCertificate=True;";
+
         private List<Livro> livros = new List<Livro>();
         private readonly HttpClient httpClient = new HttpClient();
 
         public Form1()
         {
             InitializeComponent();
-            var appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OpenLibrary");
-            Directory.CreateDirectory(appData);
-            dataFilePath = Path.Combine(appData, "meusLivros.json");
 
             btnSearch.Click += async (s, e) => await BuscarLivroAsync();
             this.Load += Form1_Load;
@@ -32,12 +30,15 @@ namespace OpenLibrary
 
         private void Form1_Load(object sender, EventArgs e)
         {
-            // Categorias padrão — ComboBox é editável para permitir novas categorias
+            //ComboBox com categorias padrão
             var categoriasPadrao = new[] { "Ficção", "Não-Ficção", "Fantasia", "Ciência", "Romance", "Biografia" };
             cboCategoria.Items.AddRange(categoriasPadrao);
             cboCategoria.Text = "Ficção";
 
-            LoadBooksFromFile();
+            GarantirCategoriasNoBanco(categoriasPadrao);
+
+            //Carrega os livros do bd via ADONet
+            CarregarLivrosDoBanco();
             RenderizarTabela();
         }
 
@@ -50,7 +51,7 @@ namespace OpenLibrary
                 return;
             }
 
-            lblStatus.Text = "Buscando...";
+            lblStatus.Text = "Buscando na API...";
             lblStatus.ForeColor = Color.Black;
 
             try
@@ -70,22 +71,30 @@ namespace OpenLibrary
                         ? $"https://covers.openlibrary.org/b/olid/{coverKey}-M.jpg"
                         : null;
 
+                    string nomeCategoria = string.IsNullOrWhiteSpace(cboCategoria.Text) ? "Sem Categoria" : cboCategoria.Text.Trim();
+
+                    //ID da categoria no banco de dados
+                    int idCategoria = ObterOuCriarIdCategoria(nomeCategoria);
+
                     var novo = new Livro
                     {
-                        Id = Guid.NewGuid().ToString(),
                         Titulo = livroJson.Value<string>("title") ?? "Desconhecido",
                         Autor = (livroJson["author_name"] != null && livroJson["author_name"].HasValues) ? livroJson["author_name"].First.ToString() : "Desconhecido",
                         AnoPublicacao = livroJson.Value<int?>("first_publish_year"),
                         CapaUrl = coverUrl,
                         Descricao = string.Empty,
-                        Categoria = string.IsNullOrWhiteSpace(cboCategoria.Text) ? "Sem Categoria" : cboCategoria.Text.Trim()
+                        IdCategoria = idCategoria,
+                        NomeCategoria = nomeCategoria
                     };
 
+                    //Salva o livro no bd e pega o ID
+                    novo.IdLivro = SalvarLivroNoBanco(novo);
+
                     livros.Add(novo);
-                    SaveBooksToFile();
                     RenderizarTabela();
+
                     txtSearch.Clear();
-                    lblStatus.Text = "✓ Livro adicionado com sucesso!";
+                    lblStatus.Text = "✓ Livro adicionado ao Banco de Dados!";
                     lblStatus.ForeColor = Color.White;
                     lblStatus.BackColor = Color.FromArgb(39, 174, 96);
                     await Task.Delay(1500);
@@ -101,41 +110,130 @@ namespace OpenLibrary
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine("Erro na requisição: " + ex);
-                lblStatus.Text = "✗ Erro ao buscar o livro. Tente novamente.";
+                Console.Error.WriteLine("Erro: " + ex);
+                lblStatus.Text = "✗ Erro ao buscar/salvar o livro.";
                 lblStatus.ForeColor = Color.White;
                 lblStatus.BackColor = Color.FromArgb(192, 57, 43);
             }
         }
 
-        private void LoadBooksFromFile()
+        #region Métodos ADO.NET
+
+        private void CarregarLivrosDoBanco()
         {
-            try
+            livros.Clear();
+            string query = @"
+                SELECT L.IdLivro, L.Titulo, L.Autor, L.AnoPublicacao, L.CapaUrl, L.Descricao, L.IdCategoria, C.Nome AS NomeCategoria
+                FROM Livros L
+                INNER JOIN Categorias C ON L.IdCategoria = C.IdCategoria";
+
+            using (SqlConnection conn = new SqlConnection(connectionString))
             {
-                if (File.Exists(dataFilePath))
+                using (SqlCommand cmd = new SqlCommand(query, conn))
                 {
-                    var json = File.ReadAllText(dataFilePath);
-                    livros = JsonConvert.DeserializeObject<List<Livro>>(json) ?? new List<Livro>();
+                    try
+                    {
+                        conn.Open();
+                        using (SqlDataReader reader = cmd.ExecuteReader())
+                        {
+                            while (reader.Read())
+                            {
+                                livros.Add(new Livro
+                                {
+                                    IdLivro = Convert.ToInt32(reader["IdLivro"]),
+                                    Titulo = reader["Titulo"].ToString(),
+                                    Autor = reader["Autor"].ToString(),
+                                    AnoPublicacao = reader["AnoPublicacao"] == DBNull.Value ? (int?)null : Convert.ToInt32(reader["AnoPublicacao"]),
+                                    CapaUrl = reader["CapaUrl"] == DBNull.Value ? null : reader["CapaUrl"].ToString(),
+                                    Descricao = reader["Descricao"].ToString(),
+                                    IdCategoria = Convert.ToInt32(reader["IdCategoria"]),
+                                    NomeCategoria = reader["NomeCategoria"].ToString()
+                                });
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("Erro ao conectar ao banco de dados: " + ex.Message, "Erro de Conexão", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
                 }
-            }
-            catch
-            {
-                livros = new List<Livro>();
             }
         }
 
-        private void SaveBooksToFile()
+        private int SalvarLivroNoBanco(Livro livro)
         {
-            try
+            string query = @"
+                INSERT INTO Livros (Titulo, Autor, AnoPublicacao, CapaUrl, Descricao, IdCategoria)
+                VALUES (@Titulo, @Autor, @AnoPublicacao, @CapaUrl, @Descricao, @IdCategoria);
+                SELECT SCOPE_IDENTITY();"; //Retorna o ID gerado
+
+            using (SqlConnection conn = new SqlConnection(connectionString))
             {
-                var json = JsonConvert.SerializeObject(livros, Formatting.Indented);
-                File.WriteAllText(dataFilePath, json);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Erro ao salvar dados: " + ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@Titulo", livro.Titulo);
+                    cmd.Parameters.AddWithValue("@Autor", livro.Autor);
+                    cmd.Parameters.AddWithValue("@AnoPublicacao", (object)livro.AnoPublicacao ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@CapaUrl", (object)livro.CapaUrl ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Descricao", livro.Descricao ?? string.Empty);
+                    cmd.Parameters.AddWithValue("@IdCategoria", livro.IdCategoria);
+
+                    conn.Open();
+                    return Convert.ToInt32(cmd.ExecuteScalar());
+                }
             }
         }
+
+        private void ExcluirLivroDoBanco(int idLivro)
+        {
+            string query = "DELETE FROM Livros WHERE IdLivro = @IdLivro";
+
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@IdLivro", idLivro);
+                    conn.Open();
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private int ObterOuCriarIdCategoria(string nomeCategoria)
+        {
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                conn.Open();
+
+                //Já existente
+                string selectQuery = "SELECT IdCategoria FROM Categorias WHERE Nome = @Nome";
+                using (SqlCommand cmdSelect = new SqlCommand(selectQuery, conn))
+                {
+                    cmdSelect.Parameters.AddWithValue("@Nome", nomeCategoria);
+                    object result = cmdSelect.ExecuteScalar();
+                    if (result != null) return Convert.ToInt32(result);
+                }
+
+                //Cria IdCategoria novo
+                string insertQuery = "INSERT INTO Categorias (Nome, Slug) VALUES (@Nome, @Slug); SELECT SCOPE_IDENTITY();";
+                using (SqlCommand cmdInsert = new SqlCommand(insertQuery, conn))
+                {
+                    cmdInsert.Parameters.AddWithValue("@Nome", nomeCategoria);
+                    cmdInsert.Parameters.AddWithValue("@Slug", nomeCategoria.ToLower().Replace(" ", "-"));
+                    return Convert.ToInt32(cmdInsert.ExecuteScalar());
+                }
+            }
+        }
+
+        private void GarantirCategoriasNoBanco(string[] categorias)
+        {
+            foreach (var cat in categorias)
+            {
+                ObterOuCriarIdCategoria(cat);
+            }
+        }
+
+        #endregion
 
         private void RenderizarTabela()
         {
@@ -158,7 +256,8 @@ namespace OpenLibrary
                     }
                 }
 
-                dgvLivros.Rows.Add(img, livro.Titulo, livro.Autor, livro.AnoPublicacao?.ToString() ?? "N/A", livro.Categoria);
+                //Usando livro.NomeCategoria para exibir nome na Grid
+                dgvLivros.Rows.Add(img, livro.Titulo, livro.Autor, livro.AnoPublicacao?.ToString() ?? "N/A", livro.NomeCategoria);
             }
         }
 
@@ -166,13 +265,17 @@ namespace OpenLibrary
         {
             if (e.RowIndex < 0) return;
 
-            // Se clicou na coluna de excluir (última coluna)
             if (e.ColumnIndex == dgvLivros.Columns["colExcluir"].Index)
             {
-                if (MessageBox.Show("Deseja excluir este livro?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                if (MessageBox.Show("Deseja excluir este livro do banco de dados?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
                 {
+                    var livroParaExcluir = livros[e.RowIndex];
+
+                    //Exclui do bd
+                    ExcluirLivroDoBanco(livroParaExcluir.IdLivro);
+
+                    //Exclui da lista local e atualiza a tela
                     livros.RemoveAt(e.RowIndex);
-                    SaveBooksToFile();
                     RenderizarTabela();
                 }
             }
@@ -208,16 +311,17 @@ namespace OpenLibrary
                 picCapa.Image = null;
             }
         }
-    }
 
-    public class Livro
-    {
-        public string Id { get; set; }
-        public string Titulo { get; set; }
-        public string Autor { get; set; }
-        public int? AnoPublicacao { get; set; }
-        public string CapaUrl { get; set; }
-        public string Descricao { get; set; }
-        public string Categoria { get; set; }
+        public class Livro
+        {
+            public int IdLivro { get; set; } 
+            public string Titulo { get; set; }
+            public string Autor { get; set; }
+            public int? AnoPublicacao { get; set; }
+            public string CapaUrl { get; set; }
+            public string Descricao { get; set; }
+            public int IdCategoria { get; set; } 
+            public string NomeCategoria { get; set; } 
+        }
     }
 }
