@@ -1,3 +1,13 @@
+create database library
+
+USE library
+GO
+
+CREATE USER breno FOR LOGIN breno;
+GO
+
+ALTER ROLE db_owner ADD MEMBER breno;
+GO
  -- 1. Categoria 
  CREATE TABLE Categorias ( 
  IdCategoria INT PRIMARY KEY IDENTITY(1,1), 
@@ -15,8 +25,8 @@ Descricao VARCHAR(MAX), -- Sinopse do livro
 IdCategoria INT NOT NULL, FOREIGN KEY (IdCategoria) REFERENCES Categorias(IdCategoria) 
 ); 
 
-CREATE LOGIN ADM WITH 
-PASSWORD=N'Julia032007.',
+CREATE LOGIN breno WITH 
+PASSWORD=N'LltEr032007.',
 	DEFAULT_DATABASE=library,
 	CHECK_EXPIRATION=OFF,
 	CHECK_POLICY=ON;
